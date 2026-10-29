@@ -84,55 +84,13 @@ jobs:
       - name: Build ${{ matrix.target }}
         run: make -j"$(nproc)"
 
-      - name: Pack ${{ matrix.target }}
-        run: |
-          mkdir release
-          tar --zstd -cf "release/ponwrt-${{ matrix.target }}.tar.zst" \
-            -C bin/targets/airoha "${{ matrix.target }}"
-
-      - name: Upload ${{ matrix.target }}
+      - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
           name: ponwrt-${{ matrix.target }}
-          path: release/*.tar.zst
+          path: |
+            bin/targets/airoha/${{ matrix.target }}/*.bin
+            bin/targets/airoha/${{ matrix.target }}/*.itb
           if-no-files-found: error
           retention-days: 7
 
-  release:
-    name: Create release
-    needs: build
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download firmware archives
-        uses: actions/download-artifact@v4
-        with:
-          pattern: ponwrt-*
-          path: release
-          merge-multiple: true
-
-      - name: Create checksums
-        working-directory: release
-        run: sha256sum *.tar.zst > sha256sums
-
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.tag }}
-          PRERELEASE: ${{ inputs.prerelease }}
-        run: |
-          args=(
-            "$RELEASE_TAG"
-            release/*.tar.zst
-            release/sha256sums
-            --repo "$GITHUB_REPOSITORY"
-            --target "$GITHUB_SHA"
-            --title "PonWrt $RELEASE_TAG"
-            --generate-notes
-          )
-          if [ "$PRERELEASE" = true ]; then
-            args+=(--prerelease)
-          fi
-          gh release create "${args[@]}"
