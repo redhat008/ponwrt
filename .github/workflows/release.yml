@@ -5,8 +5,9 @@ on:
     inputs:
       tag:
         description: Release tag
-        required: true
+        required: false
         type: string
+        default: 'daily' 
       prerelease:
         description: Mark as prerelease
         required: true
@@ -25,13 +26,13 @@ jobs:
     name: Build ${{ matrix.target }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
-    environment: release
+    # environment: release
     strategy:
       fail-fast: false
       matrix:
         target:
           - an7581
-          - an7583
+          # - an7583
 
     steps:
       - uses: actions/checkout@v6
@@ -69,16 +70,6 @@ jobs:
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-
-      - name: Load repository signing key
-        env:
-          PONWRT_APK_PRIVATE_KEY: ${{ secrets.PONWRT_APK_PRIVATE_KEY }}
-        run: |
-          if [ -n "$PONWRT_APK_PRIVATE_KEY" ]; then
-            umask 077
-            printf '%s\n' "$PONWRT_APK_PRIVATE_KEY" > private-key.pem
-            openssl ec -in private-key.pem -pubout -out public-key.pem
-          fi
 
       - name: Configure ${{ matrix.target }}
         run: |
