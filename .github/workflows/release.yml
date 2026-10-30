@@ -7,7 +7,7 @@ on:
         description: Release tag
         required: false
         type: string
-        default: 'daily' 
+        default: '' 
       prerelease:
         description: Mark as prerelease
         required: true
