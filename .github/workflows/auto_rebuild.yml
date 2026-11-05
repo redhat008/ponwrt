@@ -1,0 +1,210 @@
+name: Auto Build & Release PonWrt
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'     # 每6小时检查一次上游
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 强制构建（忽略上游无更新判断）
+        required: false
+        default: false
+        type: boolean
+      tag:
+        description: Release tag（留空自动生成）
+        required: false
+        type: string
+      prerelease:
+        description: 标记为预发布
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: pbs05/ponwrt
+  UPSTREAM_BRANCH: master
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  # ========== 1. 检查上游是否有更新 ==========
+  check-upstream:
+    runs-on: ubuntu-24.04
+    outputs:
+      commit: ${{ steps.gethash.outputs.commit }}
+      changed: ${{ steps.detect.outputs.changed }}
+    steps:
+      - name: 获取上游最新 commit
+        id: gethash
+        run: |
+          COMMIT=$(curl -sL "https://api.github.com/repos/${UPSTREAM_REPO}/commits/${UPSTREAM_BRANCH}" | jq -r '.sha')
+          echo "commit=$COMMIT" >> $GITHUB_OUTPUT
+          echo "上游最新提交: $COMMIT"
+
+      - name: 用 cache 判断是否有更新
+        id: detect
+        uses: actions/cache@v4
+        with:
+          path: .last-upstream-commit
+          key: upstream-${{ steps.gethash.outputs.commit }}
+      - name: 输出 changed 标记
+        id: changed
+        run: |
+          if [ -f .last-upstream-commit ] && [ "$(cat .last-upstream-commit)" = "${{ steps.gethash.outputs.commit }}" ]; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "上游无更新"
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "${{ steps.gethash.outputs.commit }}" > .last-upstream-commit
+            echo "检测到上游更新"
+          fi
+
+  # ========== 2. 编译 ==========
+  build:
+    name: Build ${{ matrix.target }}
+    needs: check-upstream
+    if: >-
+      needs.check-upstream.outputs.changed == 'true' ||
+      inputs.force == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - an7581
+          # - an7583
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free build space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo apt-get clean
+
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo \
+            uglifyjs unzip wget xmlto xxd zlib1g-dev zstd
+
+      - name: Cache downloads
+        uses: actions/cache@v4
+        with:
+          path: dl
+          key: ponwrt-dl-${{ matrix.target }}-${{ hashFiles('feeds.conf.default', 'configs/*.config') }}
+          restore-keys: |
+            ponwrt-dl-${{ matrix.target }}-
+
+      - name: Clone upstream source
+        run: |
+          git clone --depth 1 -b "$UPSTREAM_BRANCH" "https://github.com/$UPSTREAM_REPO" openwrt
+          cd openwrt
+          echo "编译基于提交: $(git rev-parse HEAD)"
+
+      - name: Install feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure ${{ matrix.target }}
+        run: |
+          cd openwrt
+          ./scripts/kconfig.pl + \
+            "../configs/${{ matrix.target }}.config" \
+            ../configs/release.config > .config
+          make defconfig
+
+      - name: Download sources
+        run: make download -j"$(nproc)"
+        working-directory: openwrt
+
+      - name: Build ${{ matrix.target }}
+        run: make -j"$(nproc)"
+        working-directory: openwrt
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: ponwrt-${{ matrix.target }}
+          path: |
+            openwrt/bin/targets/airoha/${{ matrix.target }}/*-sysupgrade.bin
+            openwrt/bin/targets/airoha/${{ matrix.target }}/*-factory.bin
+            openwrt/bin/targets/airoha/${{ matrix.target }}/sha256sums
+          if-no-files-found: error
+          retention-days: 7
+
+  # ========== 3. 发版 ==========
+  release:
+    name: Create release
+    needs: [check-upstream, build]
+    if: >-
+      (needs.check-upstream.outputs.changed == 'true' || inputs.force == true) &&
+      success()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download firmware artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ponwrt-*
+          path: release
+          merge-multiple: true
+
+      - name: Create checksums
+        working-directory: release
+        run: sha256sum * > sha256sums
+
+      - name: Compute tag
+        id: meta
+        run: |
+          DATE=$(date +%Y%m%d-%H%M)
+          UP=$(echo "${{ needs.check-upstream.outputs.commit }}" | cut -c1-7)
+          TAG="auto-${DATE}-up${UP}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_ENV"
+          echo "生成 tag: $TAG"
+
+      - name: Delete old release/tag if exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          UPSTREAM_COMMIT: ${{ needs.check-upstream.outputs.commit }}
+        run: |
+          args=(
+            "$TAG"
+            release/*
+            --repo "$GITHUB_REPOSITORY"
+            --target "$GITHUB_SHA"
+            --title "PonWrt $TAG"
+            --notes "自动构建 @ $(date)
+
+          上游提交: $UPSTREAM_COMMIT"
+          )
+          if [ "${{ inputs.prerelease }}" != "false" ]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"
