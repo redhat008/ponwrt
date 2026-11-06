@@ -145,8 +145,8 @@ jobs:
         with:
           name: ponwrt-${{ matrix.target }}
           path: |
-            openwrt/bin/targets/airoha/${{ matrix.target }}/*-sysupgrade.bin
-            openwrt/bin/targets/airoha/${{ matrix.target }}/*-factory.bin
+            openwrt/bin/targets/airoha/${{ matrix.target }}/*.bin
+            openwrt/bin/targets/airoha/${{ matrix.target }}/*.itb
             openwrt/bin/targets/airoha/${{ matrix.target }}/sha256sums
           if-no-files-found: error
           retention-days: 7
